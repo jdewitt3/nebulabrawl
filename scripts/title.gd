@@ -116,6 +116,9 @@ func _draw_menu() -> void:
 			PixelFont.draw(self, Vector2(x, y), text, YELLOW, 1, Color(0, 0, 0, 1))
 		else:
 			PixelFont.draw(self, Vector2(x, y), text, WHITE, 1, Color(0, 0, 0, 1))
+	PixelFont.draw(self, Vector2(8, 122), "CREATED BY JIM DEWITT", WHITE, 1, Color(0, 0, 0, 1))
+	PixelFont.draw(self, Vector2(8, 132), "ROCHESTER MUSIC LAB", Color("88ccff"), 1, Color(0, 0, 0, 1))
+	PixelFont.draw(self, Vector2(8, 142), "FOR NON-COMMERCIAL USE ONLY", DIM, 1, Color(0, 0, 0, 1))
 	PixelFont.draw(self, Vector2(8, 158), "Z: SELECT  X: BACK  F1: AUDIO HUD", DIM, 1, Color(0, 0, 0, 1))
 	PixelFont.draw(self, Vector2(8, 168), "IN BATTLE: F2 WIN F3 LOSE F4 LOW HP F7 AUTO", DIM, 1, Color(0, 0, 0, 1))
 

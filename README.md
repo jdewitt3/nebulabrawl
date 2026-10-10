@@ -116,3 +116,9 @@ and `SFX` audio buses.
 | `scripts/audio.gd` | Audio cue system and HUD |
 | `scripts/title.gd` | Title screen and cue list |
 | `shaders/` | Wavy battle backgrounds, sprite flash/dissolve, transition swirl |
+
+## Credits
+
+Created by **Jim DeWitt**, Rochester Music Lab.
+
+This demo is for **non-commercial use only**.
