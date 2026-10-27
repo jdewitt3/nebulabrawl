@@ -84,6 +84,13 @@ var particles: Array = []
 var beams: Array = []
 var rings: Array = []
 
+# BASH timing mini-game (empty when not running)
+const TIMING_BOX := Rect2(40, 94, 240, 30)
+const TRACK_X := 48.0
+const TRACK_W := 224.0
+var timing := {}
+signal _timing_done(grade: Dictionary)
+
 var bg: ColorRect
 var ui: Node2D
 
@@ -115,7 +122,7 @@ func _setup_party() -> void:
 		party.append({
 			"idx": i, "id": p.id, "name": p.name, "bash": p.bash, "techs": p.techs,
 			"max_hp": p.hp, "hp": p.hp, "hp_disp": float(p.hp), "max_en": p.en, "en": p.en,
-			"atk": p.atk, "def": p.def, "spd": p.spd,
+			"atk": p.atk, "def": p.def, "spd": p.spd, "timing": p.timing,
 			"ko": false, "guard": false, "shield": 0, "stun": 0,
 			"portrait": Sprites.get_tex(p.id), "raise": 0.0, "bounce": 0.0, "hurt": 0.0,
 		})
@@ -211,8 +218,11 @@ func _battle_loop() -> void:
 		await _lose()
 
 
+## Checks the crew directly rather than trusting `wiped`: when everyone hits 0
+## in the same frame, the flag isn't set until after menus have been cancelled,
+## and a round where nobody can act would otherwise loop forever.
 func _battle_over() -> bool:
-	return wiped or _all_enemies_dead()
+	return wiped or _all_enemies_dead() or _alive_party().is_empty()
 
 
 func _all_enemies_dead() -> bool:
@@ -492,16 +502,18 @@ func _do_bash(a: Dictionary, target: Dictionary) -> void:
 	if e == null:
 		return
 	await _card_hop(a)
+	await say(a.bash.format({"a": a.name, "t": e.name}), 0.2)
+	var grade := await _timing_minigame(a)
+	if e.dead:  # e.g. the F2 shortcut fired mid-swing
+		return
 	Audio.play_sfx("attack_swing")
-	await say(a.bash.format({"a": a.name, "t": e.name}), 0.3)
-	if randf() < 0.06:
+	if grade.is_empty():
 		Audio.play_sfx("miss")
 		_floater(_enemy_center(e), "MISS", DIM)
 		await say("JUST MISSED!")
 		return
-	var dmg := _calc_damage(a.atk, e.def, 1.0)
-	if randf() < 0.1:
-		dmg = int(dmg * 2.2)
+	var dmg := _calc_damage(a.atk, e.def, grade.mult)
+	if grade.id == "perfect":
 		Audio.play_sfx("critical_hit")
 		_flash(Color(1, 1, 1, 0.85))
 		shake = 5.0
@@ -512,6 +524,53 @@ func _do_bash(a: Dictionary, target: Dictionary) -> void:
 	await say("%d HP OF DAMAGE TO %s!" % [dmg, e.name])
 	if e.hp <= 0:
 		await _kill_enemy(e)
+
+
+## Deltarune-style timing bar: a marker slides across and the player presses
+## confirm as it crosses the target zone. Returns the grade it earned from
+## Data.TIMING_GRADES, or {} for a miss (never pressed).
+func _timing_minigame(a: Dictionary) -> Dictionary:
+	var zone := randf_range(0.55, 0.85)
+	timing = {"x": 0.0, "zone": zone, "speed": a.timing / 1.1, "done": false, "grade": {}, "stop": 2.0}
+	if auto_battle:
+		# pick a grade, then stop the marker somewhere inside that grade's band
+		var grades: Array = Data.TIMING_GRADES
+		var g := _weighted(grades, "auto")
+		var i := grades.find(g)
+		var lo: float = 0.0 if i == 0 else grades[i - 1].px + 1
+		var hi: float = minf(g.px, 60.0)
+		timing.stop = zone - randf_range(lo, maxf(lo, hi)) / TRACK_W
+	Audio.play_sfx("timing_start")
+	var grade: Dictionary = await _timing_done
+	await _wait(0.45)
+	timing = {}
+	return grade
+
+
+func _resolve_timing(pressed: bool) -> void:
+	var grade := {}
+	if pressed:
+		var px := absf(timing.x - timing.zone) * TRACK_W
+		for g in Data.TIMING_GRADES:
+			if px <= g.px:
+				grade = g
+				break
+	timing.done = true
+	timing.grade = grade
+	Audio.play_sfx("timing_" + grade.get("id", "miss"))
+	_timing_done.emit(grade)
+
+
+func _update_timing(delta: float) -> void:
+	if timing.is_empty() or timing.done:
+		return
+	timing.x += timing.speed * delta
+	if timing.x >= timing.stop:
+		timing.x = timing.stop
+		_resolve_timing(true)
+	elif timing.x >= 1.0:
+		timing.x = 1.0
+		_resolve_timing(false)
 
 
 func _do_tech(a: Dictionary, id: String, target) -> void:
@@ -770,13 +829,13 @@ func _damage_text(m: Dictionary, dmg: int) -> String:
 	return "%s TOOK %d DAMAGE!" % [m.name, dmg]
 
 
-func _weighted(moves: Array) -> Dictionary:
+func _weighted(moves: Array, key := "w") -> Dictionary:
 	var total := 0.0
 	for mv in moves:
-		total += mv.w
+		total += mv[key]
 	var r := randf() * total
 	for mv in moves:
-		r -= mv.w
+		r -= mv[key]
 		if r <= 0.0:
 			return mv
 	return moves[-1]
@@ -997,6 +1056,7 @@ func _process(delta: float) -> void:
 	_update_party(delta)
 	_update_enemies(delta)
 	_update_fx(delta)
+	_update_timing(delta)
 	if shake > 0.0:
 		position = Vector2(randi_range(-1, 1), randi_range(-1, 1)) * ceilf(shake)
 		shake = move_toward(shake, 0.0, 14.0 * delta)
@@ -1104,6 +1164,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if _debug_key(event.keycode):
 			return
+	if not timing.is_empty():
+		if not timing.done and not auto_battle and event.is_action_pressed("confirm"):
+			_resolve_timing(true)
+		return
 	if msg_waiting:
 		if event.is_action_pressed("confirm"):
 			if msg_shown < msg_len:
@@ -1221,6 +1285,7 @@ func _draw_ui() -> void:
 	_draw_top_box()
 	_draw_list_menu()
 	_draw_target_cursor()
+	_draw_timing()
 	for m in party:
 		_draw_card(m)
 	for f in floaters:
@@ -1279,6 +1344,34 @@ func _draw_list_menu() -> void:
 		if i == menu.index and int(t * 4.0) % 2 == 0:
 			PixelFont.draw(ui, Vector2(r.position.x + 5, y), "▶", YELLOW)
 		PixelFont.draw(ui, Vector2(r.position.x + 13, y), menu.options[i], (WHITE if i == menu.index else Color("c0c0e0")) if ok else Color("50506a"))
+
+
+func _draw_timing() -> void:
+	if timing.is_empty():
+		return
+	var colors := {"perfect": YELLOW, "great": CYAN, "good": GREEN, "weak": ORANGE, "miss": DIM}
+	var grade: Dictionary = timing.grade
+	var gcol: Color = colors[grade.get("id", "miss")]
+	_box(TIMING_BOX, gcol if timing.done else YELLOW)
+	var label: String = grade.get("text", "MISS...") if timing.done else "PRESS Z IN THE ZONE!"
+	PixelFont.draw(ui, TIMING_BOX.position + Vector2(6, 5), label, gcol if timing.done else WHITE)
+	# the track, with the target zone drawn widest band first
+	var ty := TIMING_BOX.position.y + 17
+	ui.draw_rect(Rect2(TRACK_X, ty, TRACK_W, 7), Color(0, 0, 0, 0.75))
+	var cx := roundf(TRACK_X + timing.zone * TRACK_W)
+	var bands := {"good": Color("4a3a8a"), "great": Color("2a7aa0"), "perfect": YELLOW}
+	# grades are listed narrowest-first, so draw them in reverse
+	for i in range(Data.TIMING_GRADES.size() - 1, -1, -1):
+		var g: Dictionary = Data.TIMING_GRADES[i]
+		if bands.has(g.id):
+			ui.draw_rect(Rect2(cx - g.px, ty, g.px * 2 + 1, 7), bands[g.id])
+	# the moving marker
+	var mx := roundf(TRACK_X + clampf(timing.x, 0.0, 1.0) * TRACK_W)
+	var mcol := WHITE
+	if timing.done and int(t * 12.0) % 2 == 0:
+		mcol = gcol
+	ui.draw_rect(Rect2(mx - 2, ty - 3, 4, 13), Color(0, 0, 0, 1))
+	ui.draw_rect(Rect2(mx - 1, ty - 2, 2, 11), mcol)
 
 
 func _draw_target_cursor() -> void:

@@ -2,13 +2,24 @@ extends RefCounted
 ## ALL THE NUMBERS AND JOKES IN ONE PLACE. Tweak freely!
 ## In text, {a} = the actor, {t} = the target, {e} = the enemy.
 
+# timing = how fast the BASH timing marker moves (1.0 = crosses the bar in ~1.1s)
 const PARTY := [
-	{"id": "nova", "name": "NOVA", "hp": 64, "en": 20, "atk": 14, "def": 6, "spd": 12,
+	{"id": "nova", "name": "NOVA", "hp": 64, "en": 20, "atk": 14, "def": 6, "spd": 12, "timing": 1.3,
 		"techs": ["laser_volley", "overdrive"], "bash": "{a} FIRES A BLASTER AT {t}!"},
-	{"id": "bolt", "name": "BOLT", "hp": 92, "en": 14, "atk": 12, "def": 10, "spd": 6,
+	{"id": "bolt", "name": "BOLT", "hp": 92, "en": 14, "atk": 12, "def": 10, "spd": 6, "timing": 0.8,
 		"techs": ["arc_welder", "shield_wall"], "bash": "{a} SWINGS A WRENCH-ARM AT {t}!"},
-	{"id": "ziggy", "name": "ZIGGY", "hp": 50, "en": 32, "atk": 8, "def": 5, "spd": 10,
+	{"id": "ziggy", "name": "ZIGGY", "hp": 50, "en": 32, "atk": 8, "def": 5, "spd": 10, "timing": 1.0,
 		"techs": ["psi_mend", "starstorm", "revive_spore"], "bash": "{a} BONKS {t} WITH A HYDROPONIC STAFF!"},
+]
+
+# BASH timing grades, checked in order. px = how far (in pixels) the marker can
+# be from the center of the target zone. Not pressing at all = a miss.
+# auto = how often auto-battle lands each grade.
+const TIMING_GRADES := [
+	{"id": "perfect", "px": 4, "mult": 1.8, "text": "PERFECT!!", "auto": 2},
+	{"id": "great", "px": 12, "mult": 1.3, "text": "GREAT!", "auto": 4},
+	{"id": "good", "px": 26, "mult": 1.0, "text": "GOOD", "auto": 3},
+	{"id": "weak", "px": 9999, "mult": 0.5, "text": "WEAK...", "auto": 1},
 ]
 
 # target: enemy | all_enemies | ally | ally_ko | all_allies | none

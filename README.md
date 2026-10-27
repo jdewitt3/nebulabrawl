@@ -86,7 +86,8 @@ The title screen also has an **AUDIO CUE LIST** page for auditioning every cue.
 ### SFX cues
 
 `menu_move`, `menu_select`, `menu_back`, `menu_error`, `text_blip`, `encounter`,
-`attack_swing`, `attack_hit`, `critical_hit`, `miss`, `enemy_attack`, `player_hurt`,
+`timing_start`, `timing_perfect`, `timing_great`, `timing_good`, `timing_weak`,
+`timing_miss`, `attack_swing`, `attack_hit`, `critical_hit`, `miss`, `enemy_attack`, `player_hurt`,
 `enemy_defeat`, `boss_defeat`, `party_ko`, `guard`, `heal`, `energy`, `revive`,
 `tech_laser`, `tech_overdrive`, `tech_zap`, `tech_shield`, `tech_psi`, `stun`,
 `drain`, `enemy_heal`, `item_use`, `grenade`, `duck_squeak`, `run_away`, `run_fail`,
@@ -100,6 +101,11 @@ and `SFX` audio buses.
 - **Crew:** NOVA (pilot, damage), BOLT (robot, tank/shields), ZIGGY (psychic
   botanist, healing).
 - Choose a command for each crew member, then everyone acts in speed order.
+- **BASH timing bar** (Deltarune-style): a marker slides across a bar. Press Z as
+  it crosses the zone: PERFECT (a SMAAAASH!! critical), GREAT, GOOD, or WEAK if you
+  press outside it. Don't press at all and you miss. Each crew member's marker
+  moves at a different speed (NOVA fast, BOLT slow). The grades, zone sizes and
+  speeds are in `scripts/data.gd`.
 - **Rolling HP meters** (Earthbound-style): damage ticks the meter down over time.
   A crew member hit with "mortal damage" only goes KO when their meter reaches 0,
   so heal them fast and they survive.
