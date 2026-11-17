@@ -5,8 +5,9 @@ extends Node
 ## this script looks for a matching file:
 ##     res://audio/music/<cue>.ogg / .wav / .mp3
 ##     res://audio/sfx/<cue>.ogg / .wav / .mp3
-## No file yet? Nothing plays, but the cue still shows up in the on-screen
-## HUD (toggle with F1) so you can see exactly when each one fires.
+## No file yet? Nothing plays (unless the SFX cue has a fill-in, see below), but
+## the cue still shows up in the on-screen HUD (toggle with F1) so you can see
+## exactly when each one fires.
 ##
 ## Music rules:
 ##   * Cues with "_loop" in the name loop automatically.
@@ -17,8 +18,15 @@ extends Node
 ##
 ## Per-cue volume: set in-game from TITLE > AUDIO CUE LIST (pick a cue, press Z).
 ## Saved to res://audio/volumes.cfg so the mix travels with the project.
+##
+## Fill-in SFX: TITLE > AUDIO CUE LIST > [FILL-IN SOUNDS] can generate a rough
+## placeholder for every SFX cue that has no file (recipes in sfx_synth.gd).
+## Fill-ins are rendered in memory, never written to audio/sfx/, and a real file
+## always plays instead. Which cues use one (and which take) is saved to
+## res://audio/fillins.cfg.
 
 const PixelFont := preload("res://scripts/pixel_font.gd")
+const SfxSynth := preload("res://scripts/sfx_synth.gd")
 const MUSIC_DIR := "res://audio/music/"
 const SFX_DIR := "res://audio/sfx/"
 const EXTENSIONS := ["ogg", "wav", "mp3"]
@@ -27,6 +35,8 @@ const VOLUME_FILE := "res://audio/volumes.cfg"
 const VOLUME_FILE_FALLBACK := "user://volumes.cfg"  # used if res:// is read-only (exported builds)
 const VOLUME_MIN := -30.0
 const VOLUME_MAX := 12.0
+const FILLIN_FILE := "res://audio/fillins.cfg"
+const FILLIN_FILE_FALLBACK := "user://fillins.cfg"
 
 const MUSIC_CUES := {
 	"title_loop": "Title screen.",
@@ -89,10 +99,13 @@ const SFX_CUES := {
 const GREEN := Color("66ff99")
 const DIM := Color("9090b0")
 const RED := Color("ff4466")
+const FILL := Color("66ccff")  # a generated fill-in is playing
 
 var hud_visible := true
 var hud_hidden := false  # screens can hide the HUD temporarily
 var hud_y := 36
+var sfx_dir := SFX_DIR  # tests point these somewhere else
+var fillin_file := FILLIN_FILE
 
 var _music: AudioStreamPlayer
 var _music_old: AudioStreamPlayer  # the outgoing track during a crossfade
@@ -115,6 +128,16 @@ var _trim := {}    # player -> trim dB of the cue it's playing
 var _fader := {}   # player -> fade level 0..1
 var _cue_of := {}  # player -> cue name it's playing
 
+# Fill-ins: _fillins (cue -> take number) is the saved state and is only touched
+# on the main thread. Rendered sounds go in _rendered (cue -> [take, stream]),
+# which a background task also writes, so it's guarded by _render_lock.
+var _fillins := {}
+var _rendered := {}
+var _render_lock := Mutex.new()
+var _render_task := -1
+var _render_dirty := false
+var _found_path := {}  # _load() key -> the file it found
+
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -134,6 +157,13 @@ func _ready() -> void:
 	_hud.draw.connect(_draw_hud)
 	canvas.add_child(_hud)
 	_load_volumes()
+	_load_fillins()
+
+
+func _exit_tree() -> void:
+	if _render_task != -1:
+		WorkerThreadPool.wait_for_task_completion(_render_task)
+		_render_task = -1
 
 
 # --- public API --------------------------------------------------------------
@@ -211,10 +241,15 @@ func set_danger(on: bool) -> void:
 	_layer_fade.tween_method(_set_vol.bind(_layer), _fader.get(_layer, 1.0), 1.0 if on else 0.0, 1.0)
 
 
+## Plays the cue's file, or its fill-in if it has no file (see sfx_stream()).
 func play_sfx(cue: String, quiet := false) -> void:
-	var s := _load(SFX_DIR, cue)
+	var s := _load(sfx_dir, cue)
+	var fill := false
+	if s == null:
+		s = _fillin(cue)
+		fill = s != null
 	if not quiet:
-		_note("SFX " + cue, s != null)
+		_note("SFX " + cue, s != null and not fill, fill)
 	if s == null:
 		return
 	var p := _sfx[_sfx_next]
@@ -263,8 +298,110 @@ func has_music(cue: String) -> bool:
 	return _load(MUSIC_DIR, cue) != null
 
 
+## True if a sound effect has a supplied file (fill-ins don't count).
 func has_sfx(cue: String) -> bool:
-	return _load(SFX_DIR, cue) != null
+	return _load(sfx_dir, cue) != null
+
+
+## Look for new or removed files on the next lookup (cached results are dropped).
+func rescan() -> void:
+	_cache.clear()
+	_found_path.clear()
+
+
+# --- fill-in sound effects ---------------------------------------------------
+
+## Where a sound effect comes from: "file" (supplied), "fill-in" (generated)
+## or "none". A supplied file always wins, even over an existing fill-in.
+func sfx_source(cue: String) -> String:
+	if has_sfx(cue):
+		return "file"
+	return "fill-in" if _fillins.has(cue) else "none"
+
+
+## What play_sfx() would play for a cue right now (null = silence).
+func sfx_stream(cue: String) -> AudioStream:
+	var s := _load(sfx_dir, cue)
+	return s if s else _fillin(cue)
+
+
+## The supplied file a cue plays ("" if there isn't one). kind: "music" or "sfx".
+func file_for(kind: String, cue: String) -> String:
+	var dir := MUSIC_DIR if kind == "music" else sfx_dir
+	return _found_path.get(dir + cue, "") if _load(dir, cue) != null else ""
+
+
+## SFX cues with no file and no fill-in.
+func missing_sfx() -> Array:
+	return SFX_CUES.keys().filter(func(c): return sfx_source(c) == "none" and SfxSynth.has_recipe(c))
+
+
+## SFX cues currently playing a fill-in (a cue with a supplied file isn't one).
+func fillin_cues() -> Array:
+	return SFX_CUES.keys().filter(func(c): return sfx_source(c) == "fill-in")
+
+
+## Which take of its fill-in a cue uses (0 = it has none).
+func fillin_take(cue: String) -> int:
+	return _fillins.get(cue, 0)
+
+
+## Make a fill-in for every SFX cue that has neither a file nor a fill-in.
+## Returns how many were made. Supplied files are never touched.
+func generate_fillins() -> int:
+	var made := 0
+	for cue in missing_sfx():
+		_fillins[cue] = 1
+		made += 1
+	_fillins_changed()
+	return made
+
+
+## Make a fill-in for one cue (only if it has no file). Returns true if made.
+func generate_fillin(cue: String) -> bool:
+	if sfx_source(cue) != "none" or not SfxSynth.has_recipe(cue):
+		return false
+	_fillins[cue] = 1
+	_fillins_changed()
+	return true
+
+
+## Replace a cue's fill-in with a new take (a variation on the same recipe).
+func new_take(cue: String) -> bool:
+	if sfx_source(cue) != "fill-in":
+		return false
+	_fillins[cue] += 1
+	_fillins_changed()
+	return true
+
+
+## A new take for every cue playing a fill-in. Returns how many changed.
+func new_takes() -> int:
+	var cues := fillin_cues()
+	for cue in cues:
+		_fillins[cue] += 1
+	_fillins_changed()
+	return cues.size()
+
+
+func clear_fillin(cue: String) -> void:
+	_fillins.erase(cue)
+	_fillins_changed()
+
+
+## Remove every fill-in, including dormant ones under a supplied file.
+## Returns how many were playing.
+func clear_fillins() -> int:
+	var n := fillin_cues().size()
+	_fillins.clear()
+	_fillins_changed()
+	return n
+
+
+## How many fill-ins are still waiting to be rendered in the background.
+## (Playing one before it's ready just renders it on the spot.)
+func fillins_rendering() -> int:
+	return _stale_fillins().size()
 
 
 # --- internals ---------------------------------------------------------------
@@ -312,6 +449,100 @@ func _load_volumes() -> void:
 					_volumes[kind][cue] = float(cfg.get_value(kind, cue))
 
 
+## The rendered fill-in for a cue (null if it has none). Renders it now if the
+## background pass hasn't got to it yet.
+func _fillin(cue: String) -> AudioStreamWAV:
+	var take: int = _fillins.get(cue, 0)
+	if take == 0:
+		return null
+	_render_lock.lock()
+	var r: Array = _rendered.get(cue, [])
+	_render_lock.unlock()
+	if not r.is_empty() and r[0] == take:
+		return r[1]
+	var w := SfxSynth.make(cue, take)
+	_render_lock.lock()
+	_rendered[cue] = [take, w]
+	_render_lock.unlock()
+	return w
+
+
+## [cue, take] pairs whose current take hasn't been rendered yet.
+func _stale_fillins() -> Array:
+	var jobs := []
+	_render_lock.lock()
+	for cue in _fillins:
+		var r: Array = _rendered.get(cue, [])
+		if r.is_empty() or r[0] != _fillins[cue]:
+			jobs.append([cue, _fillins[cue]])
+	_render_lock.unlock()
+	return jobs
+
+
+func _fillins_changed() -> void:
+	_render_lock.lock()
+	for cue in _rendered.keys():
+		if not _fillins.has(cue):
+			_rendered.erase(cue)
+	_render_lock.unlock()
+	_render_dirty = true
+	save_fillins()
+
+
+func save_fillins() -> void:
+	var cfg := ConfigFile.new()
+	for cue in _fillins:
+		cfg.set_value("sfx", cue, _fillins[cue])
+	if cfg.save(fillin_file) != OK and fillin_file == FILLIN_FILE:
+		cfg.save(FILLIN_FILE_FALLBACK)
+
+
+func _load_fillins() -> void:
+	_fillins.clear()
+	var paths := [fillin_file]
+	if fillin_file == FILLIN_FILE:
+		paths.append(FILLIN_FILE_FALLBACK)
+	for path in paths:
+		var cfg := ConfigFile.new()
+		if cfg.load(path) != OK:
+			continue
+		if cfg.has_section("sfx"):
+			for cue in cfg.get_section_keys("sfx"):
+				if SFX_CUES.has(cue) and SfxSynth.has_recipe(cue):
+					_fillins[cue] = maxi(1, int(cfg.get_value("sfx", cue)))
+		break
+	_render_dirty = true
+
+
+## Starts a background render for fill-ins that need one (called every frame).
+func _pump_renders() -> void:
+	if _render_task != -1:
+		if not WorkerThreadPool.is_task_completed(_render_task):
+			return
+		WorkerThreadPool.wait_for_task_completion(_render_task)
+		_render_task = -1
+	if not _render_dirty:
+		return
+	_render_dirty = false
+	var jobs := _stale_fillins()
+	if not jobs.is_empty():
+		_render_task = WorkerThreadPool.add_task(_render_jobs.bind(jobs), false, "fill-in sfx")
+
+
+## Runs on a worker thread: only reads its job list and writes _rendered.
+func _render_jobs(jobs: Array) -> void:
+	for job in jobs:
+		_render_lock.lock()
+		var r: Array = _rendered.get(job[0], [])
+		_render_lock.unlock()
+		if not r.is_empty() and r[0] == job[1]:
+			continue  # already rendered on the spot by play_sfx()
+		var w := SfxSynth.make(job[0], job[1])
+		_render_lock.lock()
+		_rendered[job[0]] = [job[1], w]
+		_render_lock.unlock()
+
+
 func _stop_all() -> void:
 	_music.stop()
 	_music_old.stop()
@@ -348,6 +579,7 @@ func _load(dir: String, cue: String) -> AudioStream:
 		elif FileAccess.file_exists(path):
 			s = _load_raw(path, ext)  # not imported yet (e.g. dropped in while the editor was closed)
 		if s:
+			_found_path[key] = path
 			break
 	if s and dir == MUSIC_DIR:
 		_set_loop(s, cue.contains("_loop"))
@@ -382,8 +614,8 @@ func _set_loop(s: AudioStream, loop: bool) -> void:
 
 # --- on-screen cue HUD -------------------------------------------------------
 
-func _note(text: String, found: bool) -> void:
-	_events.append({"text": text, "found": found, "age": 0.0})
+func _note(text: String, found: bool, fill := false) -> void:
+	_events.append({"text": text, "found": found, "fill": fill, "age": 0.0})
 	if _events.size() > 4:
 		_events.pop_front()
 
@@ -394,6 +626,7 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+	_pump_renders()
 	for e in _events:
 		e.age += delta
 	_events = _events.filter(func(e): return e.age < 6.0)
@@ -411,7 +644,7 @@ func _draw_hud() -> void:
 	if _danger:
 		lines.append(["+ DANGER LAYER", RED])
 	for e in _events:
-		var c: Color = GREEN if e.found else DIM
+		var c: Color = GREEN if e.found else (FILL if e.fill else DIM)
 		c.a = 1.0 if e.age < 4.0 else 0.5
 		lines.append([e.text, c])
 	var y := hud_y

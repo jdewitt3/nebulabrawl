@@ -4,6 +4,8 @@ extends Node2D
 ## Command-line shortcuts (handy for testing):
 ##   godot --path . -- --auto-standard   start a standard battle on auto-pilot
 ##   godot --path . -- --auto-boss       start the boss battle on auto-pilot
+##   godot --headless --path . -- --test=fillin_test
+##                                       run a check script from tests/ and quit
 
 const Title := preload("res://scripts/title.gd")
 const Battle := preload("res://scripts/battle.gd")
@@ -30,6 +32,10 @@ func _ready() -> void:
 	layer.add_child(wipe)
 	_set_wipe(0.0)
 	var args := OS.get_cmdline_user_args()
+	for a in args:
+		if a.begins_with("--test="):
+			add_child(load("res://tests/%s.gd" % a.trim_prefix("--test=")).new())
+			return
 	if "--auto-boss" in args or "--auto-standard" in args:
 		Battle.auto_battle = true
 		_start_battle("boss" if "--auto-boss" in args else "standard")

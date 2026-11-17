@@ -50,8 +50,10 @@ That's it: no code changes needed. If the Godot editor is open, it imports the f
 automatically.
 
 The **HUD** (top right, F1) shows every cue the moment it fires:
-**green** means a file was found and is playing, **gray** means there's no file yet.
-The title screen also has an **AUDIO CUE LIST** page for auditioning every cue.
+**green** means a file was found and is playing, **blue** means a generated fill-in
+is playing (see below), and **gray** means there's no sound yet.
+The title screen also has an **AUDIO CUE LIST** page for auditioning every cue. It
+uses the same colors.
 
 ### Setting cue volumes
 
@@ -68,6 +70,47 @@ Settings are saved to `audio/volumes.cfg`, so the mix stays with the project and
 applies everywhere the cue plays in-game. In the cue list, a yellow dot marks cues
 with a custom volume. The setting is a trim on top of everything else, so fades,
 crossfades and the danger layer all still work.
+
+### Fill-in sounds
+
+Want to play the demo before every sound effect exists? The game can generate a
+rough **fill-in** for any SFX cue that has no file. Each fill-in is made in code
+from a recipe that suits its cue: a punchy thud for `attack_hit`, a rising sparkle
+for `heal`, a squeak for `duck_squeak`, a crackly digital roar for `boss_roar`, and
+so on. They're placeholders to fill the silence, not finished sounds.
+
+On the **AUDIO CUE LIST** page, the first row of the SFX column is
+**[FILL-IN SOUNDS...]**. Press **Z** on it to open a panel with:
+
+- **GENERATE FILL-INS FOR N MISSING CUES:** makes one for every SFX cue with no
+  file and no fill-in yet.
+- **NEW TAKES FOR ALL:** swaps every fill-in for a variation on the same recipe.
+- **CLEAR ALL:** removes every fill-in, so those cues go silent again.
+
+New takes and clear-all replace takes you may have picked, so they ask you to press
+**Z** a second time.
+
+You can also work on one cue at a time. Pick a cue and press **Z** to open its mixer:
+
+- A cue with no sound has a **MAKE FILL-IN** row.
+- A cue with a fill-in has **NEW TAKE**, which rolls a variation, and
+  **CLEAR FILL-IN**.
+- The mixer and the bottom line of the cue list show where the sound comes from.
+  For example: `FILE: ATTACK_HIT.WAV`, `FILL-IN, TAKE 2` or `NO FILE YET`.
+
+Volume trims work on fill-ins just like on files.
+
+**Your files always win.** Fill-ins are rendered in memory while the game runs.
+Nothing is ever written to `audio/sfx/`, so a supplied file can't be overwritten.
+Drop in a file named after a cue and it plays instead of that cue's fill-in, starting
+the next time you open the cue list, or at the next launch. If you delete the file
+again, the fill-in comes back.
+
+The list of cues using a fill-in, and which take each is on, is saved to
+`audio/fillins.cfg`. Each take always sounds the same, so the set you chose comes
+back on every launch. Rendering happens in the background, which takes about half a
+second for all 39 cues. The recipes are in `scripts/sfx_synth.gd` if you want to
+tweak one.
 
 ### Music rules
 
@@ -136,8 +179,27 @@ and `SFX` audio buses.
 | `scripts/sprites.gd` | Pixel art, drawn as letters. Edit to redraw characters |
 | `scripts/battle.gd` | Battle flow, effects and UI |
 | `scripts/audio.gd` | Audio cue system and HUD |
-| `scripts/title.gd` | Title screen and cue list |
+| `scripts/sfx_synth.gd` | Fill-in sound effect recipes and the synth that renders them |
+| `scripts/title.gd` | Title screen, cue list and fill-in panel |
+| `tests/fillin_test.gd` | Checks for the fill-in sounds (see below) |
 | `shaders/` | Wavy battle backgrounds, sprite flash/dissolve, transition swirl |
+
+## Checks
+
+```
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . -- --test=fillin_test
+```
+
+This checks that:
+
+- every SFX cue has a recipe that renders to an audible, unclipped sound
+- generate, new take and clear all work, including from the menu
+- a supplied file always beats a fill-in
+- nothing is written to `audio/sfx/`
+
+It prints `ok` or `FAIL` for each check and exits non-zero if anything fails. It works
+in a scratch folder, so it never touches your `audio/sfx/`, `audio/fillins.cfg` or
+`audio/volumes.cfg`.
 
 ## Credits
 
