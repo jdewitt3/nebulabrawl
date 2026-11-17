@@ -14,12 +14,19 @@ extends Node
 ##   * "<loop>_danger" is an optional LAYER: it starts in sync with <loop>
 ##     (silent) and fades in while any crew member is at low HP.
 ##     Make it the same length/tempo as the loop it belongs to!
+##
+## Per-cue volume: set in-game from TITLE > AUDIO CUE LIST (pick a cue, press Z).
+## Saved to res://audio/volumes.cfg so the mix travels with the project.
 
 const PixelFont := preload("res://scripts/pixel_font.gd")
 const MUSIC_DIR := "res://audio/music/"
 const SFX_DIR := "res://audio/sfx/"
 const EXTENSIONS := ["ogg", "wav", "mp3"]
 const LAYER_SUFFIX := "_danger"
+const VOLUME_FILE := "res://audio/volumes.cfg"
+const VOLUME_FILE_FALLBACK := "user://volumes.cfg"  # used if res:// is read-only (exported builds)
+const VOLUME_MIN := -30.0
+const VOLUME_MAX := 12.0
 
 const MUSIC_CUES := {
 	"title_loop": "Title screen.",
@@ -102,6 +109,12 @@ var _cache := {}
 var _events: Array = []
 var _hud: Node2D
 
+# Volume = per-cue trim (dB, from the mixer) + fader (0..1, for fades/layers).
+var _volumes := {"music": {}, "sfx": {}}
+var _trim := {}    # player -> trim dB of the cue it's playing
+var _fader := {}   # player -> fade level 0..1
+var _cue_of := {}  # player -> cue name it's playing
+
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -120,6 +133,7 @@ func _ready() -> void:
 	_hud = Node2D.new()
 	_hud.draw.connect(_draw_hud)
 	canvas.add_child(_hud)
+	_load_volumes()
 
 
 # --- public API --------------------------------------------------------------
@@ -150,15 +164,15 @@ func play_music(cue: String, fade := 0.0, then_loop := "") -> void:
 		_music = tmp
 	else:
 		_music.stop()
-	_music.stream = stream
-	_music.volume_db = linear_to_db(0.0001) if fade > 0.0 else 0.0
+	_assign(_music, "music", cue, stream)
+	_set_vol(0.0 if fade > 0.0 else 1.0, _music)
 	_music.play()
 	_start_layer(cue)
 	if fade > 0.0:
 		_fade = create_tween().set_parallel()
 		_fade.tween_method(_set_vol.bind(_music), 0.0, 1.0, fade)
 		if _music_old.playing:
-			_fade.tween_method(_set_vol.bind(_music_old), db_to_linear(_music_old.volume_db), 0.0, fade)
+			_fade.tween_method(_set_vol.bind(_music_old), _fader.get(_music_old, 1.0), 0.0, fade)
 		_fade.chain().tween_callback(_music_old.stop)
 
 
@@ -179,7 +193,7 @@ func stop_music(fade := 0.5) -> void:
 	_fade = create_tween().set_parallel()
 	for p in [_music, _music_old, _layer]:
 		if p.playing:
-			_fade.tween_method(_set_vol.bind(p), db_to_linear(p.volume_db), 0.0, fade)
+			_fade.tween_method(_set_vol.bind(p), _fader.get(p, 1.0), 0.0, fade)
 	_fade.chain().tween_callback(_stop_all)
 
 
@@ -194,7 +208,7 @@ func set_danger(on: bool) -> void:
 	if not _layer.playing:
 		return
 	_layer_fade = create_tween()
-	_layer_fade.tween_method(_set_vol.bind(_layer), db_to_linear(_layer.volume_db), 1.0 if on else 0.0, 1.0)
+	_layer_fade.tween_method(_set_vol.bind(_layer), _fader.get(_layer, 1.0), 1.0 if on else 0.0, 1.0)
 
 
 func play_sfx(cue: String, quiet := false) -> void:
@@ -205,8 +219,44 @@ func play_sfx(cue: String, quiet := false) -> void:
 		return
 	var p := _sfx[_sfx_next]
 	_sfx_next = (_sfx_next + 1) % _sfx.size()
-	p.stream = s
+	_assign(p, "sfx", cue, s)
+	_set_vol(1.0, p)
 	p.play()
+
+
+## Restart a cue from the top (used by the cue list / mixer).
+func audition(kind: String, cue: String) -> void:
+	if kind == "sfx":
+		play_sfx(cue)
+	else:
+		stop_music(0.0)
+		play_music(cue)
+
+
+func get_volume(kind: String, cue: String) -> float:
+	return _volumes[kind].get(cue, 0.0)
+
+
+## Set a cue's volume trim in dB. Applies immediately, even mid-playback.
+func set_volume(kind: String, cue: String, db: float) -> void:
+	db = clampf(db, VOLUME_MIN, VOLUME_MAX)
+	if is_zero_approx(db):
+		_volumes[kind].erase(cue)
+	else:
+		_volumes[kind][cue] = db
+	for p in _cue_of:
+		if _cue_of[p] == kind + "/" + cue:
+			_trim[p] = db
+			_apply_vol(p)
+
+
+func save_volumes() -> void:
+	var cfg := ConfigFile.new()
+	for kind in _volumes:
+		for cue in _volumes[kind]:
+			cfg.set_value(kind, cue, _volumes[kind][cue])
+	if cfg.save(VOLUME_FILE) != OK:
+		cfg.save(VOLUME_FILE_FALLBACK)
 
 
 func has_music(cue: String) -> bool:
@@ -236,7 +286,30 @@ func _ensure_bus(bus: String) -> void:
 
 
 func _set_vol(v: float, p: AudioStreamPlayer) -> void:
-	p.volume_db = linear_to_db(maxf(v, 0.0001))
+	_fader[p] = v
+	_apply_vol(p)
+
+
+func _apply_vol(p: AudioStreamPlayer) -> void:
+	p.volume_db = linear_to_db(maxf(_fader.get(p, 1.0), 0.0001)) + _trim.get(p, 0.0)
+
+
+## Load a cue into a player and pick up that cue's volume trim.
+func _assign(p: AudioStreamPlayer, kind: String, cue: String, stream: AudioStream) -> void:
+	p.stream = stream
+	_cue_of[p] = kind + "/" + cue
+	_trim[p] = get_volume(kind, cue)
+
+
+func _load_volumes() -> void:
+	for path in [VOLUME_FILE, VOLUME_FILE_FALLBACK]:
+		var cfg := ConfigFile.new()
+		if cfg.load(path) != OK:
+			continue
+		for kind in _volumes:
+			if cfg.has_section(kind):
+				for cue in cfg.get_section_keys(kind):
+					_volumes[kind][cue] = float(cfg.get_value(kind, cue))
 
 
 func _stop_all() -> void:
@@ -251,8 +324,8 @@ func _start_layer(cue: String) -> void:
 	var ls := _load(MUSIC_DIR, cue + LAYER_SUFFIX)
 	if ls == null:
 		return
-	_layer.stream = ls
-	_layer.volume_db = 0.0 if _danger else linear_to_db(0.0001)
+	_assign(_layer, "music", cue + LAYER_SUFFIX, ls)
+	_set_vol(1.0 if _danger else 0.0, _layer)
 	_layer.play()
 
 

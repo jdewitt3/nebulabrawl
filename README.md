@@ -53,6 +53,22 @@ The **HUD** (top right, F1) shows every cue the moment it fires:
 **green** means a file was found and is playing, **gray** means there's no file yet.
 The title screen also has an **AUDIO CUE LIST** page for auditioning every cue.
 
+### Setting cue volumes
+
+On the **AUDIO CUE LIST** page, pick a cue and press **Z**. It plays, and a small
+mixer opens:
+
+- **VOLUME:** left/right adjusts the cue's level in 1 dB steps, from −30 to +12 dB.
+  Music changes live while it plays. Sound effects replay on each change so you
+  can hear the difference.
+- **PLAY AGAIN** restarts the cue, and **RESET TO 0 DB** clears its adjustment.
+- **DONE** (or X) saves your settings.
+
+Settings are saved to `audio/volumes.cfg`, so the mix stays with the project and
+applies everywhere the cue plays in-game. In the cue list, a yellow dot marks cues
+with a custom volume. The setting is a trim on top of everything else, so fades,
+crossfades and the danger layer all still work.
+
 ### Music rules
 
 - Anything with `_loop` in its name **loops automatically**.

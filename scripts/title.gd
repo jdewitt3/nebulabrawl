@@ -1,5 +1,6 @@
 extends Node2D
 ## Title screen, plus an "AUDIO CUE LIST" page for auditioning sounds in-game.
+## Picking a cue there plays it and opens a small mixer panel to set its volume.
 
 signal start_battle(kind: String)
 
@@ -9,7 +10,9 @@ const WHITE := Color("f0f0ff")
 const DIM := Color("7a7a9a")
 const YELLOW := Color("ffe066")
 const GREEN := Color("66ff99")
-const VISIBLE_ROWS := 14
+const VISIBLE_ROWS := 13
+const MIXER_ROWS := ["VOLUME", "PLAY AGAIN", "RESET TO 0 DB", "DONE"]
+const MIXER_BOX := Rect2(36, 48, 248, 86)
 
 var index := 0
 var page := "menu"
@@ -20,6 +23,7 @@ var locked := false
 var col := 0
 var rows := [0, 0]
 var lists := [[], []]
+var mixer_row := 0
 
 
 func _ready() -> void:
@@ -62,6 +66,9 @@ func _unhandled_input(event: InputEvent) -> void:
 					page = "cues"
 					Audio.hud_hidden = true
 		return
+	if page == "mixer":
+		_mixer_input(event)
+		return
 	# cue list page
 	var n: int = lists[col].size()
 	if event.is_action_pressed("up", true):
@@ -72,17 +79,54 @@ func _unhandled_input(event: InputEvent) -> void:
 		col = 1 - col
 	elif event.is_action_pressed("confirm"):
 		var cue: String = lists[col][rows[col]]
-		if col == 1:
-			Audio.play_sfx(cue)
-		elif cue == "[STOP MUSIC]":
+		if cue == "[STOP MUSIC]":
 			Audio.stop_music(0.3)
 		else:
-			Audio.play_music(cue)
+			Audio.audition(_kind(), cue)
+			page = "mixer"
+			mixer_row = 0
 	elif event.is_action_pressed("cancel"):
 		page = "menu"
 		Audio.hud_hidden = false
 		Audio.play_music("title_loop", 0.5)
 
+
+func _mixer_input(event: InputEvent) -> void:
+	var cue := _cue()
+	if event.is_action_pressed("up", true):
+		mixer_row = (mixer_row - 1 + MIXER_ROWS.size()) % MIXER_ROWS.size()
+	elif event.is_action_pressed("down", true):
+		mixer_row = (mixer_row + 1) % MIXER_ROWS.size()
+	elif mixer_row == 0 and (event.is_action_pressed("left", true) or event.is_action_pressed("right", true)):
+		var step := 1.0 if event.is_action_pressed("right", true) else -1.0
+		Audio.set_volume(_kind(), cue, Audio.get_volume(_kind(), cue) + step)
+		if _kind() == "sfx" and not event.is_echo():
+			Audio.audition("sfx", cue)  # hear each change; music adjusts live
+	elif event.is_action_pressed("confirm"):
+		match mixer_row:
+			1:
+				Audio.audition(_kind(), cue)
+			2:
+				Audio.set_volume(_kind(), cue, 0.0)
+				if _kind() == "sfx":
+					Audio.audition("sfx", cue)
+			3:
+				_close_mixer()
+	elif event.is_action_pressed("cancel"):
+		_close_mixer()
+
+
+func _close_mixer() -> void:
+	Audio.save_volumes()
+	page = "cues"
+
+
+func _kind() -> String:
+	return "music" if col == 0 else "sfx"
+
+
+func _cue() -> String:
+	return lists[col][rows[col]]
 
 func _draw() -> void:
 	draw_rect(Rect2(0, 0, 320, 180), Color("07040f"))
@@ -94,6 +138,8 @@ func _draw() -> void:
 		_draw_menu()
 	else:
 		_draw_cues()
+	if page == "mixer":
+		_draw_mixer()
 
 
 func _draw_menu() -> void:
@@ -125,7 +171,7 @@ func _draw_menu() -> void:
 
 func _draw_cues() -> void:
 	draw_rect(Rect2(0, 0, 320, 180), Color(0, 0, 0, 0.7))
-	PixelFont.draw(self, Vector2(6, 5), "AUDIO CUES   Z: PLAY  X: BACK", YELLOW)
+	PixelFont.draw(self, Vector2(6, 5), "AUDIO CUES  Z: PLAY + VOLUME  X: BACK", YELLOW)
 	PixelFont.draw(self, Vector2(6, 16), "GREEN = FILE FOUND. GRAY = NO FILE YET.", DIM)
 	var heads := ["MUSIC  (AUDIO/MUSIC/)", "SFX  (AUDIO/SFX/)"]
 	for c in 2:
@@ -144,7 +190,55 @@ func _draw_cues() -> void:
 			if c == col and r == rows[c]:
 				draw_rect(Rect2(x - 2, y - 2, 154, 11), Color(1, 1, 1, 0.12))
 				PixelFont.draw(self, Vector2(x, y), "▶", YELLOW)
+			elif cue != "[STOP MUSIC]" and Audio.get_volume("music" if c == 0 else "sfx", cue) != 0.0:
+				draw_rect(Rect2(x + 1, y + 2, 3, 3), YELLOW)  # this cue has a volume trim
 			PixelFont.draw(self, Vector2(x + 8, y), cue, GREEN if found else DIM)
+	# volume of the highlighted cue
+	var sel := _cue()
+	if sel != "[STOP MUSIC]":
+		PixelFont.draw(self, Vector2(6, 171), "VOLUME: " + _db_text(Audio.get_volume(_kind(), sel)), DIM)
+
+
+func _draw_mixer() -> void:
+	var r := MIXER_BOX
+	draw_rect(r, Color(0.04, 0.03, 0.1, 0.97))
+	draw_rect(r, YELLOW, false, 1.0)
+	var x := r.position.x + 8
+	var y := r.position.y + 6
+	var cue := _cue()
+	PixelFont.draw(self, Vector2(x, y), cue, YELLOW)
+	PixelFont.draw(self, Vector2(x, y + 10), ("MUSIC" if _kind() == "music" else "SFX") + " CUE VOLUME", DIM)
+	for i in MIXER_ROWS.size():
+		var ry := y + 26 + i * 12
+		var sel := i == mixer_row
+		if sel and int(t * 4.0) % 2 == 0:
+			PixelFont.draw(self, Vector2(x, ry), "▶", YELLOW)
+		PixelFont.draw(self, Vector2(x + 8, ry), MIXER_ROWS[i], WHITE if sel else DIM)
+		if i == 0:
+			_draw_volume_meter(Vector2(x + 58, ry), Audio.get_volume(_kind(), cue), sel)
+
+
+## "< -3 DB >" plus a bar from VOLUME_MIN to VOLUME_MAX with a tick at 0 dB.
+func _draw_volume_meter(pos: Vector2, db: float, selected: bool) -> void:
+	var col_text := YELLOW if selected else WHITE
+	var text := _db_text(db)
+	PixelFont.draw(self, pos, "<", DIM)
+	PixelFont.draw(self, pos + Vector2(10, 0), text, col_text)
+	PixelFont.draw(self, pos + Vector2(10 + PixelFont.width(text) + 4, 0), ">", DIM)
+	var bx := pos.x + 76
+	var bw := 100.0
+	var span := Audio.VOLUME_MAX - Audio.VOLUME_MIN
+	draw_rect(Rect2(bx, pos.y + 1, bw, 5), Color(0, 0, 0, 0.8))
+	var fill := (db - Audio.VOLUME_MIN) / span * bw
+	draw_rect(Rect2(bx, pos.y + 1, roundf(fill), 5), GREEN if db <= 0.0 else Color("ff8844"))
+	var zero := roundf(bx + (0.0 - Audio.VOLUME_MIN) / span * bw)
+	draw_rect(Rect2(zero, pos.y - 1, 1, 9), WHITE)
+
+
+func _db_text(db: float) -> String:
+	if is_zero_approx(db):
+		return "0 DB"
+	return "%+d DB" % int(db)
 
 
 func _make_planet() -> ImageTexture:
